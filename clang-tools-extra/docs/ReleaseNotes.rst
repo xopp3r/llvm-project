@@ -184,6 +184,11 @@ New checks
   Detects error-prone Curiously Recurring Template Pattern usage, when the CRTP
   can be constructed outside itself and the derived class.
 
+- New :doc:`bugprone-no-bitfield-in-union
+  <clang-tidy/checks/bugprone/no-bitfield-in-union>` check.
+
+  Check for MISRA 6.3 rule "A bit field shall not be declared as a member of union"
+
 - New :doc:`bugprone-pointer-arithmetic-on-polymorphic-object
   <clang-tidy/checks/bugprone/pointer-arithmetic-on-polymorphic-object>` check.
 

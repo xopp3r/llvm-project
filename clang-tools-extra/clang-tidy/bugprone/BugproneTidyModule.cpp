@@ -46,6 +46,7 @@
 #include "MultiLevelImplicitPointerConversionCheck.h"
 #include "MultipleNewInOneExpressionCheck.h"
 #include "MultipleStatementMacroCheck.h"
+#include "NoBitfieldInUnionCheck.h"
 #include "NoEscapeCheck.h"
 #include "NonZeroEnumToBoolConversionCheck.h"
 #include "NotNullTerminatedResultCheck.h"
@@ -139,6 +140,8 @@ public:
         "bugprone-inaccurate-erase");
     CheckFactories.registerCheck<IncorrectEnableIfCheck>(
         "bugprone-incorrect-enable-if");
+    CheckFactories.registerCheck<NoBitfieldInUnionCheck>(
+        "bugprone-no-bitfield-in-union");
     CheckFactories.registerCheck<ReturnConstRefFromParameterCheck>(
         "bugprone-return-const-ref-from-parameter");
     CheckFactories.registerCheck<SwitchMissingDefaultCaseCheck>(
