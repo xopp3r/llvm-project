@@ -14,13 +14,17 @@ using namespace clang::ast_matchers;
 namespace clang::tidy::bugprone {
 
 void NoBitfieldInUnionCheck::registerMatchers(MatchFinder *Finder) {
-  const auto Matcher = fieldDecl(isBitField(), hasParent(tagDecl(isUnion()))).bind("errorprone_bitfield");
+  const auto Matcher = fieldDecl(isBitField(), hasParent(tagDecl(isUnion())))
+                           .bind("errorprone_bitfield");
   Finder->addMatcher(Matcher, this);
 }
 
 void NoBitfieldInUnionCheck::check(const MatchFinder::MatchResult &Result) {
-  const auto *MatchedDecl = Result.Nodes.getNodeAs<FieldDecl>("errorprone_bitfield");
-  diag(MatchedDecl->getLocation(), "bit field %0 is declared as a member of union, which is forbidden by MISRA rule 6.3")
+  const auto *MatchedDecl =
+      Result.Nodes.getNodeAs<FieldDecl>("errorprone_bitfield");
+  diag(MatchedDecl->getLocation(),
+       "bit field %0 is declared as a member of union, which is forbidden by "
+       "MISRA rule 6.3")
       << MatchedDecl;
 }
 
