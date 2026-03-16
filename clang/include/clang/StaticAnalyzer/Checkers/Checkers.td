@@ -438,6 +438,10 @@ def UndefinedNewArraySizeChecker : Checker<"NewArraySize">,
   HelpText<"Check if the size of the array in a new[] expression is undefined">,
   Documentation<HasDocumentation>;
 
+def AtomicsInitBeforeUse : Checker<"AtomicsInitBeforeUse">,
+  HelpText<"Check if atomics are properly initialized before being accessed">,
+  Documentation<NotDocumented>;
+
 } // end "core.uninitialized"
 
 //===----------------------------------------------------------------------===//
