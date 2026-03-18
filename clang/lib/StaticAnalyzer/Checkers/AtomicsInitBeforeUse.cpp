@@ -31,6 +31,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/AST/Decl.h"
+#include "clang/AST/DeclBase.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/Type.h"
 #include "clang/StaticAnalyzer/Checkers/BuiltinCheckerRegistration.h"
@@ -40,7 +42,9 @@
 #include "clang/StaticAnalyzer/Core/PathSensitive/CallEvent.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/CheckerContext.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/MemRegion.h"
-#include "llvm/Support/raw_ostream.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/ProgramState.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/ProgramState_Fwd.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/SymExpr.h"
 #include <utility>
 
 using namespace clang;
@@ -50,18 +54,33 @@ namespace {
 
 struct AtomicState {
 private:
-  bool Init;
-  AtomicState(bool Initialized) : Init(Initialized) {}
+  enum Kind { Uninitialized, Initialized, Escaped } K;
+
+  const Stmt *S;
+
+  AtomicState(Kind k, const Stmt *s) : K(k), S(s) {}
 
 public:
-  bool isInitialized() const { return Init; }
+  bool isInitialized() const { return K == Initialized; }
+  bool isUninitialized() const { return K == Uninitialized; }
+  bool isEscaped() const { return K == Escaped; }
 
-  static AtomicState getInitialized() { return AtomicState(true); }
-  static AtomicState getUninitialized() { return AtomicState(false); }
+  static AtomicState getInitialized(const Stmt *s) {
+    return AtomicState(Initialized, s);
+  }
+  static AtomicState getUninitialized(const Stmt *s) {
+    return AtomicState(Uninitialized, s);
+  }
+  static AtomicState getEscaped(const Stmt *s) {
+    return AtomicState(Escaped, s);
+  }
 
-  bool operator==(const AtomicState &X) const { return Init == X.Init; }
+  bool operator==(const AtomicState &X) const { return K == X.K and S == X.S; }
 
-  void Profile(llvm::FoldingSetNodeID &ID) const { ID.AddBoolean(Init); }
+  void Profile(llvm::FoldingSetNodeID &ID) const {
+    ID.AddInteger(K);
+    ID.AddPointer(S);
+  }
 };
 
 } // end anonymous namespace
@@ -71,10 +90,15 @@ REGISTER_MAP_WITH_PROGRAMSTATE(AtomicRegionMap, const MemRegion *, AtomicState)
 namespace {
 
 class AtomicsInitBeforeUseChecker
-    : public Checker<check::PreCall, check::PointerEscape, check::Bind,
-                     check::Location> {
+    : public Checker<check::PreCall, check::PostCall,
+                     check::PointerEscape, // check::Bind,
+                     check::Location, check::PreStmt<ReturnStmt>,
+                     check::PreStmt<DeclStmt>> {
 
   const CallDescription AtomicInitFn{CDM::SimpleFunc, {"atomic_init"}, 2};
+  const CallDescription MallocFn{CDM::SimpleFunc, {"malloc"}, 1};
+  const CallDescription CallocFn{CDM::SimpleFunc, {"calloc"}, 2};
+  const CallDescription ReallocFn{CDM::SimpleFunc, {"realloc"}, 2};
 
   const BugType UninitializedAccess{this, "Uninitialized atomic access",
                                     "MISRA rule 9.7"};
@@ -92,96 +116,150 @@ class AtomicsInitBeforeUseChecker
   void reportUninitializedEscape(const MemRegion *R, const Stmt *S,
                                  CheckerContext &C) const;
 
-  bool isAtomicType(QualType T) const { return T->isAtomicType(); }
-
-  const MemRegion *getAtomicRegion(SVal Loc) const {
-    const MemRegion *R = Loc.getAsRegion();
+  bool isAtomicRegion(const MemRegion *R) const {
     if (not R)
-      return nullptr;
-
+      return false;
     const TypedValueRegion *TVR = R->getAs<TypedValueRegion>();
     if (not TVR)
-      return nullptr;
+      return false;
 
-    if (not isAtomicType(TVR->getValueType()))
-      return nullptr;
-
-    return R;
+    QualType T = TVR->getValueType();
+    if (T.isNull())
+      return false;
+    return T->isAtomicType();
   }
 
-  std::pair<ProgramStateRef, const AtomicState *>
-  getOrCreateState(ProgramStateRef State, const MemRegion *R) const {
-    const AtomicState *AS = State->get<AtomicRegionMap>(R);
-    if (AS)
-      return {State, AS};
+  bool hasStaticStorage(const MemRegion *R) const {
+    if (const auto *VR = R->getBaseRegion()->getAs<VarRegion>())
+      return VR->getDecl()->hasGlobalStorage();
+    return false;
+  }
 
-    AtomicState NewState = AtomicState::getUninitialized();
-    if (auto *VR = dyn_cast<VarRegion>(R->getBaseRegion())) {
-      if (VR->getDecl()->hasGlobalStorage()) {
-        // static storage duration
-        NewState = AtomicState::getInitialized();
+  const AtomicState *getStateForRegion(const MemRegion *R,
+                                       ProgramStateRef State) const {
+    const AtomicState *AS = State->get<AtomicRegionMap>(R);
+
+    while (not AS and R) {
+      if (auto *ER = R->getAs<ElementRegion>()) {
+        R = ER->getSuperRegion();
+      } else if (auto *FR = R->getAs<FieldRegion>()) {
+        R = FR->getSuperRegion();
       } else {
-        // automatic
-        NewState = AtomicState::getUninitialized();
+        break;
       }
-    } else {
-      // other: heap, ...
-      NewState = AtomicState::getUninitialized();
+      AS = State->get<AtomicRegionMap>(R);
     }
 
-    State = State->set<AtomicRegionMap>(R, NewState);
-    return {State, State->get<AtomicRegionMap>(R)};
+    return AS;
   }
 
 public:
   void checkPreCall(const CallEvent &Call, CheckerContext &C) const {
-    if (not AtomicInitFn.matches(Call))
-      return;
+    if (AtomicInitFn.matches(Call)) {
 
-    const SVal Arg = Call.getArgSVal(0);
-    const MemRegion *R = getAtomicRegion(Arg);
-    if (not R)
-      return;
+      if (const MemRegion *R = Call.getArgSVal(0).getAsRegion()) {
+        ProgramStateRef State = C.getState();
+        const AtomicState *AS = getStateForRegion(R, State);
+        if (AS->isInitialized()) {
+          reportDoubleInit(R, Call, C);
+        } else {
+          ProgramStateRef State = C.getState();
+          State = State->set<AtomicRegionMap>(
+              R, AtomicState::getInitialized(Call.getOriginExpr()));
+          C.addTransition(State);
+        }
+      }
 
-    ProgramStateRef State = C.getState();
-    auto [NewState, AS] = getOrCreateState(State, R);
-    if (AS->isInitialized()) {
-      reportDoubleInit(R, Call, C);
+    } else {
+
+      if (const Decl *FD = Call.getDecl())
+        if (FD->hasBody())
+          return; // allow ptr to escape to func, that we will go through
+
+      for (unsigned i = 0; i < Call.getNumArgs(); ++i) {
+        const MemRegion *R = Call.getArgSVal(i).getAsRegion();
+        if (not R)
+          continue;
+
+        const VarRegion *VR = dyn_cast<VarRegion>(R->getBaseRegion());
+        if (not VR)
+          continue;
+
+        const VarDecl *VD = VR->getDecl();
+        if (not VD)
+          continue;
+
+        if (not VD->getType()->isAtomicType())
+          continue;
+
+        const AtomicState *AS = getStateForRegion(R, C.getState());
+        if (AS and AS->isInitialized()) {
+          continue;
+        }
+
+        reportUninitializedEscape(R, Call.getArgExpr(i), C);
+      }
     }
-
-    NewState = NewState->set<AtomicRegionMap>(R, AtomicState::getInitialized());
-    C.addTransition(NewState);
   }
 
-  void checkBind(SVal Loc, SVal Val, const Stmt *S,
-                 /*bool AtDeclInit,*/ CheckerContext &C) const {
+  void checkPostCall(const CallEvent &Call, CheckerContext &C) const {
+    if (MallocFn.matches(Call) or CallocFn.matches(Call) or
+        ReallocFn.matches(Call)) {
+      SVal RetVal = Call.getReturnValue();
+      const MemRegion *R = RetVal.getAsRegion();
+      if (not R)
+        return;
 
-    if (not isa<DeclStmt>(S)) // not AtDeclInit in newer versions
-      return;
+      ProgramStateRef State = C.getState();
+      State = State->set<AtomicRegionMap>(
+          R, AtomicState::getUninitialized(Call.getOriginExpr()));
+      C.addTransition(State);
+    } else {
 
-    const MemRegion *R = getAtomicRegion(Loc);
-    if (not R)
-      return;
+      for (unsigned i = 0; i < Call.getNumArgs(); ++i) {
+        const MemRegion *R = Call.getArgSVal(i).getAsRegion();
+        if (not R)
+          continue;
 
-    ProgramStateRef State = C.getState();
-    State = State->set<AtomicRegionMap>(R, AtomicState::getInitialized());
-    C.addTransition(State);
+        ProgramStateRef State = C.getState();
+        const AtomicState *AS = getStateForRegion(R, State);
+
+        if (AS and AS->isInitialized())
+          continue;
+        if (AS and AS->isEscaped()) {
+          reportUninitializedEscape(R, Call.getArgExpr(i), C);
+        }
+      }
+    }
   }
 
   void checkLocation(SVal Loc, bool IsLoad, const Stmt *S,
                      CheckerContext &C) const {
-
-    const MemRegion *R = getAtomicRegion(Loc);
+    const MemRegion *R = Loc.getAsRegion();
     if (not R)
       return;
 
+    if (not isAtomicRegion(R))
+      return;
+
     ProgramStateRef State = C.getState();
-    auto [NewState, AS] = getOrCreateState(State, R);
-    if (not AS->isInitialized()) {
+    const AtomicState *AS = getStateForRegion(R, State);
+
+    if (not AS) {
+      if (hasStaticStorage(R)) {
+        State = State->set<AtomicRegionMap>(R, AtomicState::getInitialized(S));
+        C.addTransition(State);
+        return;
+      }
       reportUninitializedAccess(R, S, C);
+      return;
     }
 
-    C.addTransition(NewState);
+    if (AS->isEscaped()) {
+      reportUninitializedEscape(R, S, C);
+    } else if (not AS->isInitialized()) {
+      reportUninitializedAccess(R, S, C);
+    }
   }
 
   ProgramStateRef checkPointerEscape(ProgramStateRef State,
@@ -193,35 +271,73 @@ public:
         AtomicInitFn.matches(*Call)) {
       return State;
     }
+    MemRegionManager &MRM = State->getStateManager().getRegionManager();
+    for (SymbolRef Sym : Escaped) {
+      const SymbolicRegion *SR = MRM.getSymbolicRegion(Sym);
 
-    for (const auto *Sym : Escaped) {
-      // const MemRegion *R = getAtomicRegion(Sym);
-      const MemRegion *R =
-          Sym->getOriginRegion(); // хз как получить MemoryRegion, на который
-                                  // указывает убежавший указатель
-      if (not R)
+      if (not SR)
         continue;
 
-      auto [NewState, AS] = getOrCreateState(State, R);
-      State = NewState;
-
-      if (not AS->isInitialized()) {
-        llvm::errs() << "POINTER ESCAPE\n";
+      if (const AtomicState *AS = getStateForRegion(SR, State)) {
+        if (not AS->isInitialized()) {
+          State = State->set<AtomicRegionMap>(
+              SR,
+              AtomicState::getEscaped(Call ? Call->getOriginExpr() : nullptr));
+        }
       }
     }
     return State;
   }
+
+  void checkPreStmt(const DeclStmt *S, CheckerContext &C) const {
+    if (not S)
+      return;
+
+    for (const Decl *D : S->decls()) {
+      if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+        ProgramStateRef State = C.getState();
+        const VarRegion *VR = State->getRegion(VD, C.getLocationContext());
+        if (not VR)
+          continue;
+
+        if (VD->hasInit() or VD->hasConstantInitialization()) {
+          State =
+              State->set<AtomicRegionMap>(VR, AtomicState::getInitialized(S));
+        } else {
+          if (VD->hasGlobalStorage()) {
+            State =
+                State->set<AtomicRegionMap>(VR, AtomicState::getInitialized(S));
+          } else {
+            State = State->set<AtomicRegionMap>(
+                VR, AtomicState::getUninitialized(S));
+          }
+        }
+
+        C.addTransition(State);
+      }
+    }
+  }
+
+  void checkPreStmt(const ReturnStmt *S, CheckerContext &C) const {
+    if (not S)
+      return;
+
+    const Expr *E = S->getRetValue();
+    if (not E)
+      return;
+
+    const MemRegion *R = C.getSVal(E).getAsRegion();
+    if (not R)
+      return;
+
+    ProgramStateRef State = C.getState();
+    const AtomicState *AS = getStateForRegion(R, State);
+
+    if (AS and AS->isEscaped()) {
+      reportUninitializedEscape(R, S, C);
+    }
+  }
 };
-
-} // end anonymous namespace
-
-void ento::registerAtomicsInitBeforeUse(CheckerManager &mgr) {
-  mgr.registerChecker<AtomicsInitBeforeUseChecker>();
-}
-
-bool ento::shouldRegisterAtomicsInitBeforeUse(const CheckerManager &mgr) {
-  return true;
-}
 
 void AtomicsInitBeforeUseChecker::reportUninitializedAccess(
     const MemRegion *R, const Stmt *S, CheckerContext &C) const {
@@ -231,6 +347,20 @@ void AtomicsInitBeforeUseChecker::reportUninitializedAccess(
 
   auto Report = std::make_unique<PathSensitiveBugReport>(
       UninitializedAccess, "Access to uninitialized atomic object", ErrNode);
+  Report->markInteresting(R);
+  Report->addRange(S->getSourceRange());
+
+  C.emitReport(std::move(Report));
+}
+
+void AtomicsInitBeforeUseChecker::reportUninitializedEscape(
+    const MemRegion *R, const Stmt *S, CheckerContext &C) const {
+  ExplodedNode *ErrNode = C.generateNonFatalErrorNode();
+  if (not ErrNode)
+    return;
+
+  auto Report = std::make_unique<PathSensitiveBugReport>(
+      UninitializedEscape, "Uninitialized atomic object escapes", ErrNode);
   Report->markInteresting(R);
   Report->addRange(S->getSourceRange());
 
@@ -253,4 +383,14 @@ void AtomicsInitBeforeUseChecker::reportDoubleInit(const MemRegion *R,
     Report->addRange(S->getSourceRange());
 
   C.emitReport(std::move(Report));
+}
+
+} // end anonymous namespace
+
+void ento::registerAtomicsInitBeforeUse(CheckerManager &mgr) {
+  mgr.registerChecker<AtomicsInitBeforeUseChecker>();
+}
+
+bool ento::shouldRegisterAtomicsInitBeforeUse(const CheckerManager &mgr) {
+  return true;
 }
