@@ -369,9 +369,9 @@ int nested_inlined_no_unroll1() {
   int k;
   for (int i = 0; i < 9; i++) {
 #ifdef DFS
-    clang_analyzer_numTimesReached(); // expected-warning {{18}}
+    clang_analyzer_numTimesReached(); // expected-warning {{19}}
 #else
-    clang_analyzer_numTimesReached(); // expected-warning {{14}}
+    clang_analyzer_numTimesReached(); // expected-warning {{15}}
 #endif
     k = simple_unknown_bound_loop();  // reevaluation without inlining, splits the state as well
   }

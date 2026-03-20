@@ -27,6 +27,7 @@
 // CHECK-NEXT: core.builtin.NoReturnFunctions
 // CHECK-NEXT: core.uninitialized.ArraySubscript
 // CHECK-NEXT: core.uninitialized.Assign
+// CHECK-NEXT: core.uninitialized.AtomicsInitBeforeUse
 // CHECK-NEXT: core.uninitialized.Branch
 // CHECK-NEXT: core.uninitialized.CapturedBlockVariable
 // CHECK-NEXT: core.uninitialized.UndefReturn
