@@ -44,7 +44,9 @@
 #include "clang/StaticAnalyzer/Core/PathSensitive/MemRegion.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramState.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramState_Fwd.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/SVals.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SymExpr.h"
+#include "llvm/Support/raw_ostream.h"
 #include <utility>
 
 using namespace clang;
@@ -99,6 +101,7 @@ class AtomicsInitBeforeUseChecker
   const CallDescription MallocFn{CDM::SimpleFunc, {"malloc"}, 1};
   const CallDescription CallocFn{CDM::SimpleFunc, {"calloc"}, 2};
   const CallDescription ReallocFn{CDM::SimpleFunc, {"realloc"}, 2};
+  const CallDescription FreeFn{CDM::SimpleFunc, {"free"}, 1};
 
   const BugType UninitializedAccess{this, "Uninitialized atomic access",
                                     "MISRA rule 9.7"};
@@ -153,14 +156,32 @@ class AtomicsInitBeforeUseChecker
     return AS;
   }
 
+  static QualType getDeepPointeeType(QualType T) {
+  QualType Result = T, PointeeType = T->getPointeeType();
+  while (!PointeeType.isNull()) {
+    Result = PointeeType;
+    PointeeType = PointeeType->getPointeeType();
+  }
+  return Result;
+}
+
 public:
   void checkPreCall(const CallEvent &Call, CheckerContext &C) const {
     if (AtomicInitFn.matches(Call)) {
 
-      if (const MemRegion *R = Call.getArgSVal(0).getAsRegion()) {
+        const SVal Arg = Call.getArgSVal(0);
+        if (Arg.isUnknownOrUndef()) return;
+        
+        const QualType Type = Arg.getType(C.getASTContext());
+        if (not getDeepPointeeType(Type)->isAtomicType()) 
+          return;
+        
+        const MemRegion *R = Arg.getAsRegion();
+        if (not R) return;
+
         ProgramStateRef State = C.getState();
         const AtomicState *AS = getStateForRegion(R, State);
-        if (AS->isInitialized()) {
+        if (AS and AS->isInitialized()) {
           reportDoubleInit(R, Call, C);
         } else {
           ProgramStateRef State = C.getState();
@@ -168,44 +189,19 @@ public:
               R, AtomicState::getInitialized(Call.getOriginExpr()));
           C.addTransition(State);
         }
-      }
 
-    } else {
-
-      if (const Decl *FD = Call.getDecl())
-        if (FD->hasBody())
-          return; // allow ptr to escape to func, that we will go through
-
-      for (unsigned i = 0; i < Call.getNumArgs(); ++i) {
-        const MemRegion *R = Call.getArgSVal(i).getAsRegion();
-        if (not R)
-          continue;
-
-        const VarRegion *VR = dyn_cast<VarRegion>(R->getBaseRegion());
-        if (not VR)
-          continue;
-
-        const VarDecl *VD = VR->getDecl();
-        if (not VD)
-          continue;
-
-        if (not VD->getType()->isAtomicType())
-          continue;
-
-        const AtomicState *AS = getStateForRegion(R, C.getState());
-        if (AS and AS->isInitialized()) {
-          continue;
-        }
-
-        reportUninitializedEscape(R, Call.getArgExpr(i), C);
-      }
-    }
+    } 
   }
 
   void checkPostCall(const CallEvent &Call, CheckerContext &C) const {
+    if (FreeFn.matches(Call)) return; // TODO add other
+
     if (MallocFn.matches(Call) or CallocFn.matches(Call) or
-        ReallocFn.matches(Call)) {
+        ReallocFn.matches(Call)) { // TODO add other mem alloc functions
+          
       SVal RetVal = Call.getReturnValue();
+      if (RetVal.isUnknownOrUndef()) return;
+      
       const MemRegion *R = RetVal.getAsRegion();
       if (not R)
         return;
@@ -214,21 +210,36 @@ public:
       State = State->set<AtomicRegionMap>(
           R, AtomicState::getUninitialized(Call.getOriginExpr()));
       C.addTransition(State);
+
     } else {
 
-      for (unsigned i = 0; i < Call.getNumArgs(); ++i) {
-        const MemRegion *R = Call.getArgSVal(i).getAsRegion();
+       for (unsigned i = 0; i < Call.getNumArgs(); ++i) {
+
+        const SVal Arg = Call.getArgSVal(i);
+        if (Arg.isUnknownOrUndef()) continue;
+
+        const QualType Type = Arg.getType(C.getASTContext());
+        if (Type.isNull()) continue;
+
+        if (not Type->isAtomicType() and not getDeepPointeeType(Type)->isAtomicType()) 
+          continue;
+
+        const MemRegion *R = Arg.getAsRegion();
         if (not R)
           continue;
 
-        ProgramStateRef State = C.getState();
-        const AtomicState *AS = getStateForRegion(R, State);
-
-        if (AS and AS->isInitialized())
-          continue;
-        if (AS and AS->isEscaped()) {
+        const AtomicState *AS = getStateForRegion(R, C.getState());
+        if (AS and AS->isEscaped()) 
           reportUninitializedEscape(R, Call.getArgExpr(i), C);
-        }
+        
+        bool analyzible = false;
+        if (const auto *b = Call.getDecl()) analyzible = b->hasBody();
+
+        if (not analyzible) 
+          if (AS and not AS->isInitialized()) 
+            reportUninitializedEscape(R, Call.getOriginExpr(), C);
+          
+        
       }
     }
   }

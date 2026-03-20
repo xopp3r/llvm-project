@@ -4,6 +4,7 @@ typedef _Atomic(int) atomic;
 
 extern int extern_f(void *);
 extern void* malloc(unsigned long _);
+extern void free(void *);
 extern int atomic_init(void *, int);
 
 struct S {
@@ -161,6 +162,11 @@ atomic* ret_escape3(void) {
     return a;
 }
 
+void malloc_free(void) {
+    atomic* a = malloc(sizeof(*a)); 
+    free(a);
+}
+
 int* false_positives(int *p) {
     int g;
     g = 0;
@@ -172,4 +178,9 @@ int* false_positives(int *p) {
     arr[0] = 0;
     *p = arr[1];
     return g ? m : p;        
+}
+
+void fp(void) {
+    int* m = (int *)malloc(5 * sizeof(int));
+    free(m);
 }
