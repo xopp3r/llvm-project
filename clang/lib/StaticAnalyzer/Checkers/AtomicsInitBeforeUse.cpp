@@ -156,9 +156,9 @@ class AtomicsInitBeforeUseChecker
     return AS;
   }
 
-  static QualType getDeepPointeeType(QualType T) {
+  static QualType getPointeeType(QualType T) {
   QualType Result = T, PointeeType = T->getPointeeType();
-  while (!PointeeType.isNull()) {
+  if (!PointeeType.isNull()) {
     Result = PointeeType;
     PointeeType = PointeeType->getPointeeType();
   }
@@ -173,7 +173,7 @@ public:
         if (Arg.isUnknownOrUndef()) return;
         
         const QualType Type = Arg.getType(C.getASTContext());
-        if (not getDeepPointeeType(Type)->isAtomicType()) 
+        if (not getPointeeType(Type)->isAtomicType()) 
           return;
         
         const MemRegion *R = Arg.getAsRegion();
@@ -221,7 +221,7 @@ public:
         const QualType Type = Arg.getType(C.getASTContext());
         if (Type.isNull()) continue;
 
-        if (not Type->isAtomicType() and not getDeepPointeeType(Type)->isAtomicType()) // TODO need to go only 1 level deep into 
+        if (not Type->isAtomicType() and not getPointeeType(Type)->isAtomicType())
           continue;
 
         const MemRegion *R = Arg.getAsRegion();
@@ -306,6 +306,10 @@ public:
 
     for (const Decl *D : S->decls()) {
       if (const VarDecl *VD = dyn_cast<VarDecl>(D)) {
+
+        if (not VD->getType().isAtomicType())
+          continue;
+
         ProgramStateRef State = C.getState();
         const VarRegion *VR = State->getRegion(VD, C.getLocationContext());
         if (not VR)
