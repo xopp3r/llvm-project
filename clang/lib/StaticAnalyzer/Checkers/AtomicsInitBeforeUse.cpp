@@ -300,7 +300,7 @@ public:
     return State;
   }
 
-  void checkPreStmt(const DeclStmt *S, CheckerContext &C) const {
+  void checkPreStmt(const DeclStmt *S, CheckerContext &C) const { // ensure that function parametes marked as initialized
     if (not S)
       return;
 
