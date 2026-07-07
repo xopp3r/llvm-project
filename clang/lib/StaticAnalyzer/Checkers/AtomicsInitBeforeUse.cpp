@@ -176,7 +176,7 @@ public:
         if (not getPointeeType(Type)->isAtomicType()) 
           return;
         
-        const MemRegion *R = Arg.getAsRegion();
+        const MemRegion *R = Arg.getAsRegion(); // questiable, is it region of value, or value treated as region? TODO 
         if (not R) return;
 
         ProgramStateRef State = C.getState();
