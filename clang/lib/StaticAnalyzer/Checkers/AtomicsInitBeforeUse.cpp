@@ -221,7 +221,7 @@ public:
         const QualType Type = Arg.getType(C.getASTContext());
         if (Type.isNull()) continue;
 
-        if (not Type->isAtomicType() and not getDeepPointeeType(Type)->isAtomicType()) 
+        if (not Type->isAtomicType() and not getDeepPointeeType(Type)->isAtomicType()) // TODO need to go only 1 level deep into 
           continue;
 
         const MemRegion *R = Arg.getAsRegion();
@@ -345,7 +345,7 @@ public:
     const AtomicState *AS = getStateForRegion(R, State);
 
     if (AS and AS->isEscaped()) {
-      reportUninitializedEscape(R, S, C);
+      reportUninitializedEscape(R, S, C); // TODO verify, that it catches uninit escape
     }
   }
 };
