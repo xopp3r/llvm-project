@@ -93,7 +93,7 @@ namespace {
 
 class AtomicsInitBeforeUseChecker
     : public Checker<check::PreCall, check::PostCall,
-                     check::PointerEscape, // check::Bind,
+                     check::PointerEscape, // TODO check::DeadSymbols,
                      check::Location, check::PreStmt<ReturnStmt>,
                      check::PreStmt<DeclStmt>> {
 
